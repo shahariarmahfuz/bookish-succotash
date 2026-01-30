@@ -7,7 +7,7 @@ import libsql
 
 from config import TURSO_DATABASE_URL, TURSO_AUTH_TOKEN
 
-LOCAL_REPLICA_PATH = "local.db"  # embedded replica in Replit
+LOCAL_REPLICA_PATH = "local.db"  # embedded replica in container
 
 _lock = threading.Lock()
 _conn = None
@@ -30,12 +30,9 @@ def _get_conn():
             LOCAL_REPLICA_PATH,
             sync_url=sync_url,
             auth_token=TURSO_AUTH_TOKEN,
-            sync_interval=60,
+            sync_interval=60,  # background sync
         )
-        try:
-            _conn.sync()
-        except Exception:
-            pass
+        # ❌ startup এ conn.sync() করবো না (hang হতে পারে)
     return _conn
 
 
@@ -64,7 +61,6 @@ def init_db():
             """
         )
 
-        # ✅ global name pool (name only once)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS name_pool(
@@ -78,10 +74,6 @@ def init_db():
         )
 
         conn.commit()
-        try:
-            conn.sync()
-        except Exception:
-            pass
 
 
 def upsert_user(telegram_id: int, chat_id: int):
@@ -100,7 +92,7 @@ def upsert_user(telegram_id: int, chat_id: int):
 
 def seed_names_from_file(path: str = "name.txt") -> int:
     """
-    name.txt থেকে নামগুলো DB তে ঢোকাবে (INSERT OR IGNORE)
+    name.txt থেকে নাম ঢোকাবে (INSERT OR IGNORE)
     """
     if not os.path.exists(path):
         return 0
@@ -112,7 +104,6 @@ def seed_names_from_file(path: str = "name.txt") -> int:
             if not n:
                 continue
             n = n.lower()
-            # sanitize: letters/numbers/underscore only
             n = "".join(ch for ch in n if ch.isalnum() or ch == "_")
             if n:
                 names.append(n)
@@ -130,10 +121,9 @@ def seed_names_from_file(path: str = "name.txt") -> int:
 
 def create_email_for_user(telegram_id: int, domain: str) -> Optional[str]:
     """
-    ✅ 1) unused name random pick
-    ✅ 2) name used=1 lock
-    ✅ 3) email: name + 4digit + @domain
-    ✅ name কখনও দ্বিতীয়বার ব্যবহার হবে না (global)
+    ✅ unused নাম random pick
+    ✅ name একবারই ব্যবহার হবে (global)
+    ✅ email: name + 4digit + @domain
     """
     domain = domain.strip().lower()
 
