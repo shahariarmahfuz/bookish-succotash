@@ -6,7 +6,7 @@
 BOT_TOKEN = "6843806285:AAGVYQnjIvifgSQiRKnEIR-7NyJdFcA-YVc"
 
 # Your public Replit base URL (no trailing slash)
-BASE_URL = "https://0521fd32-e221-463f-a81c-b146964bcb33-00-377t3cqi5px22.pike.replit.dev"
+BASE_URL = "https://web-production-4c2b.up.railway.app"
 
 # Telegram webhook path on your FastAPI app
 WEBHOOK_PATH = "/telegram/webhook"
