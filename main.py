@@ -1,16 +1,18 @@
-import logging
-import re
 import asyncio
+import logging
+import os
+import re
 from contextlib import asynccontextmanager
 from email import policy
 from email.parser import BytesParser
 
 from fastapi import FastAPI, Request, HTTPException
+import uvicorn
+
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart
 from aiogram.types import (
     Message,
-    Update,
     ReplyKeyboardMarkup,
     KeyboardButton,
     InlineKeyboardMarkup,
@@ -21,7 +23,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from config import BOT_TOKEN, BASE_URL, WEBHOOK_PATH, INBOUND_SECRET, DOMAIN
+from config import BOT_TOKEN, INBOUND_SECRET, DOMAIN
 from db import (
     init_db,
     upsert_user,
@@ -38,8 +40,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
-
-TELEGRAM_WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
 
 # =========================
 # UI: Reply Keyboard (Menu)
@@ -134,7 +134,6 @@ def parse_raw_email(raw_text: str):
             elif ctype == "text/html":
                 html_parts.append(content)
 
-        # external image urls from HTML
         if html_parts:
             html_all = "\n".join([str(h) for h in html_parts if str(h).strip()])
             found = re.findall(r'(?is)<img[^>]+src=["\'](https?://[^"\']+)["\']', html_all)
@@ -146,7 +145,6 @@ def parse_raw_email(raw_text: str):
                     image_urls.append(u)
             image_urls = image_urls[:5]
 
-        # body select
         body_text = ""
         if plain_parts and any(str(p).strip() for p in plain_parts):
             body_text = "\n\n".join([str(p) for p in plain_parts if str(p).strip()])
@@ -162,19 +160,7 @@ def parse_raw_email(raw_text: str):
         return (from_addr, subject, date_str, body_text, image_urls, truncated_guess)
 
     except Exception:
-        m_from = re.search(r"(?im)^from:\s*(.+)$", raw_text)
-        m_sub = re.search(r"(?im)^subject:\s*(.+)$", raw_text)
-        m_date = re.search(r"(?im)^date:\s*(.+)$", raw_text)
-
-        from_addr = m_from.group(1).strip() if m_from else ""
-        subject = m_sub.group(1).strip() if m_sub else ""
-        date_str = m_date.group(1).strip() if m_date else ""
-
-        body_text = ""
-        if "\n\n" in raw_text:
-            body_text = _clean_text(raw_text.split("\n\n", 1)[1])
-
-        return (from_addr, subject, date_str, body_text, [], True)
+        return ("", "", "", _clean_text(raw_text), [], True)
 
 async def send_multipart_email(chat_id: int, header: str, body: str, max_len: int = 3900):
     header = (header or "").strip()
@@ -210,46 +196,76 @@ async def send_multipart_email(chat_id: int, header: str, body: str, max_len: in
     total = len(chunks)
     for i, ch in enumerate(chunks, start=1):
         label = f"📩 New Email ({i}/{total})\n\n"
-        if i == 1:
-            msg = label + header + "\n\n" + ch
-        else:
-            msg = label + ch
-        await bot.send_message(chat_id, msg)
+        await bot.send_message(chat_id, (label + header + "\n\n" + ch) if i == 1 else (label + ch))
 
 # =========================
-# Lifespan (Railway friendly)
+# FastAPI app (Email receiver)
 # =========================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # DB init + seed (try but don't block startup)
-    try:
-        init_db()
-        seed_names_from_file("name.txt")
-    except Exception as e:
-        logging.exception("DB init/seed failed (continuing): %s", e)
-
-    # webhook set in background (so app responds immediately)
-    async def _set_webhook():
-        try:
-            await bot.set_webhook(TELEGRAM_WEBHOOK_URL, drop_pending_updates=True)
-            logging.info(f"✅ Telegram webhook set: {TELEGRAM_WEBHOOK_URL}")
-        except Exception as e:
-            logging.exception("Webhook set failed: %s", e)
-
-    asyncio.create_task(_set_webhook())
-
+    init_db()
+    seed_names_from_file("name.txt")
     yield
-
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-    except Exception:
-        pass
-    await bot.session.close()
 
 app = FastAPI(lifespan=lifespan)
 
+@app.get("/")
+async def root():
+    return {"status": "running"}
+
+@app.post("/api/inbound-email")
+async def inbound_email(request: Request):
+    secret = request.headers.get("x-inbound-secret", "")
+    if secret != INBOUND_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    payload = await request.json()
+    to_addr = (payload.get("to") or "").lower().strip()
+    from_payload = (payload.get("from") or "").strip()
+    subject_payload = (payload.get("subject") or "").strip()
+    raw_text = payload.get("text") or ""
+
+    if not to_addr:
+        raise HTTPException(status_code=400, detail="Missing 'to'")
+
+    telegram_id = get_user_by_address(to_addr)
+    if not telegram_id:
+        return {"ok": True, "ignored": True}
+
+    chat_id = get_chat_id(telegram_id)
+    if not chat_id:
+        return {"ok": True, "ignored": True}
+
+    from_parsed, subject_parsed, date_parsed, body_text, image_urls, truncated = parse_raw_email(raw_text)
+
+    from_addr = from_parsed or from_payload or "unknown"
+    subject = subject_parsed or subject_payload or "(no subject)"
+    date_line = f"🕒 Date: {date_parsed}\n" if date_parsed else ""
+
+    if not body_text:
+        body_text = "⚠️ Email body পাওয়া যায়নি (সম্ভবত header বড় ছিল এবং worker raw ট্রিম করেছে)।"
+    if truncated:
+        body_text += "\n\nℹ️ Note: raw email trimmed, full body নাও আসতে পারে।"
+
+    header = (
+        f"📬 To: {to_addr}\n"
+        f"👤 From: {from_addr}\n"
+        f"📝 Subject: {subject}\n"
+        f"{date_line}".strip()
+    )
+
+    await send_multipart_email(chat_id, header, body_text)
+
+    for url in image_urls[:5]:
+        try:
+            await bot.send_photo(chat_id, photo=url, caption="🖼️ Image from email")
+        except Exception:
+            pass
+
+    return {"ok": True}
+
 # =========================
-# BOT: Menu actions
+# Bot menu handlers (Polling)
 # =========================
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext):
@@ -276,13 +292,10 @@ async def help_menu(message: Message):
 @router.message(F.text.lower() == "➕ new email")
 async def new_email_btn(message: Message):
     upsert_user(message.from_user.id, message.chat.id)
-
     address = create_email_for_user(message.from_user.id, DOMAIN)
+
     if not address:
-        await message.answer(
-            "❌ name.txt এর নামগুলো শেষ হয়ে গেছে!\nনতুন নাম যোগ করে আবার চেষ্টা করো।",
-            reply_markup=MENU_KB,
-        )
+        await message.answer("❌ name.txt এর নাম শেষ!\nনতুন নাম যোগ করো।", reply_markup=MENU_KB)
         return
 
     kb = InlineKeyboardMarkup(
@@ -297,10 +310,7 @@ async def new_email_btn(message: Message):
 async def new_again_cb(call: CallbackQuery):
     address = create_email_for_user(call.from_user.id, DOMAIN)
     if not address:
-        await call.message.answer(
-            "❌ name.txt এর নামগুলো শেষ হয়ে গেছে!\nনতুন নাম যোগ করে আবার চেষ্টা করো।",
-            reply_markup=MENU_KB,
-        )
+        await call.message.answer("❌ name.txt এর নাম শেষ!\nনতুন নাম যোগ করো।", reply_markup=MENU_KB)
         await call.answer()
         return
 
@@ -331,7 +341,7 @@ async def my_emails_btn(message: Message):
         lines.append(f"{status} {addr}  ({created_at})")
 
     await message.answer(
-        "📮 তোমার emails (সর্বোচ্চ ২০টা দেখাচ্ছে):\n" + "\n".join(lines),
+        "📮 তোমার emails:\n" + "\n".join(lines),
         reply_markup=build_list_inline(rows),
     )
 
@@ -391,72 +401,24 @@ async def delete_email_input(message: Message, state: FSMContext):
 dp.include_router(router)
 
 # =========================
-# Telegram webhook endpoint
+# Run both: FastAPI + Polling
 # =========================
-@app.post(WEBHOOK_PATH)
-async def telegram_webhook(request: Request):
+async def run_api():
+    port = int(os.environ.get("PORT", 8080))  # Railway requires PORT env
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
+
+async def run_polling():
+    # ✅ webhook off (polling only)
     try:
-        data = await request.json()
-        update = Update.model_validate(data)
+        await bot.delete_webhook(drop_pending_updates=True)
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid telegram update")
-    await dp.feed_update(bot, update)
-    return {"ok": True}
+        pass
+    await dp.start_polling(bot)
 
-@app.get("/")
-async def root():
-    return {"status": "running"}
+async def main():
+    await asyncio.gather(run_api(), run_polling())
 
-# =========================
-# Inbound Email endpoint (Worker -> Railway)
-# =========================
-@app.post("/api/inbound-email")
-async def inbound_email(request: Request):
-    secret = request.headers.get("x-inbound-secret", "")
-    if secret != INBOUND_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    payload = await request.json()
-    to_addr = (payload.get("to") or "").lower().strip()
-    from_payload = (payload.get("from") or "").strip()
-    subject_payload = (payload.get("subject") or "").strip()
-    raw_text = payload.get("text") or ""
-
-    if not to_addr:
-        raise HTTPException(status_code=400, detail="Missing 'to'")
-
-    telegram_id = get_user_by_address(to_addr)
-    if not telegram_id:
-        return {"ok": True, "ignored": True}
-
-    chat_id = get_chat_id(telegram_id)
-    if not chat_id:
-        return {"ok": True, "ignored": True}
-
-    from_parsed, subject_parsed, date_parsed, body_text, image_urls, truncated = parse_raw_email(raw_text)
-
-    from_addr = from_parsed or from_payload or "unknown"
-    subject = subject_parsed or subject_payload or "(no subject)"
-    date_line = f"🕒 Date: {date_parsed}\n" if date_parsed else ""
-
-    if not body_text:
-        body_text = "⚠️ Email body পাওয়া যায়নি (সম্ভবত header বড় ছিল এবং worker raw ট্রিম করেছে)।"
-    if truncated:
-        body_text += "\n\nℹ️ Note: raw email trimmed, full body নাও আসতে পারে।"
-
-    header = (
-        f"📬 To: {to_addr}\n"
-        f"👤 From: {from_addr}\n"
-        f"📝 Subject: {subject}\n"
-        f"{date_line}".strip()
-    )
-
-    await send_multipart_email(chat_id, header, body_text)
-
-    for url in image_urls[:5]:
-        try:
-            await bot.send_photo(chat_id, photo=url, caption="🖼️ Image from email")
-        except Exception:
-            pass
-
-    return {"ok": True}
+if __name__ == "__main__":
+    asyncio.run(main())
