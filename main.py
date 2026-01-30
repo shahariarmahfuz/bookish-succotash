@@ -1,7 +1,6 @@
 import logging
-import os
-import secrets
 import re
+import asyncio
 from contextlib import asynccontextmanager
 from email import policy
 from email.parser import BytesParser
@@ -218,17 +217,33 @@ async def send_multipart_email(chat_id: int, header: str, body: str, max_len: in
         await bot.send_message(chat_id, msg)
 
 # =========================
-# Lifespan
+# Lifespan (Railway friendly)
 # =========================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
-    seed_names_from_file("name.txt")  # ✅ load names into Turso (ignore duplicates)
+    # DB init + seed (try but don't block startup)
+    try:
+        init_db()
+        seed_names_from_file("name.txt")
+    except Exception as e:
+        logging.exception("DB init/seed failed (continuing): %s", e)
 
-    await bot.set_webhook(TELEGRAM_WEBHOOK_URL, drop_pending_updates=True)
-    logging.info(f"✅ Telegram webhook set: {TELEGRAM_WEBHOOK_URL}")
+    # webhook set in background (so app responds immediately)
+    async def _set_webhook():
+        try:
+            await bot.set_webhook(TELEGRAM_WEBHOOK_URL, drop_pending_updates=True)
+            logging.info(f"✅ Telegram webhook set: {TELEGRAM_WEBHOOK_URL}")
+        except Exception as e:
+            logging.exception("Webhook set failed: %s", e)
+
+    asyncio.create_task(_set_webhook())
+
     yield
-    await bot.delete_webhook(drop_pending_updates=True)
+
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        pass
     await bot.session.close()
 
 app = FastAPI(lifespan=lifespan)
@@ -393,7 +408,7 @@ async def root():
     return {"status": "running"}
 
 # =========================
-# Inbound Email endpoint (Worker -> Replit)
+# Inbound Email endpoint (Worker -> Railway)
 # =========================
 @app.post("/api/inbound-email")
 async def inbound_email(request: Request):
@@ -426,7 +441,6 @@ async def inbound_email(request: Request):
 
     if not body_text:
         body_text = "⚠️ Email body পাওয়া যায়নি (সম্ভবত header বড় ছিল এবং worker raw ট্রিম করেছে)।"
-
     if truncated:
         body_text += "\n\nℹ️ Note: raw email trimmed, full body নাও আসতে পারে।"
 
@@ -439,7 +453,6 @@ async def inbound_email(request: Request):
 
     await send_multipart_email(chat_id, header, body_text)
 
-    # external image URLs only
     for url in image_urls[:5]:
         try:
             await bot.send_photo(chat_id, photo=url, caption="🖼️ Image from email")
@@ -447,11 +460,3 @@ async def inbound_email(request: Request):
             pass
 
     return {"ok": True}
-
-# =========================
-# Run (Replit)
-# =========================
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
