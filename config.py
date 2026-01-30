@@ -1,31 +1,27 @@
-import os
-from dotenv import load_dotenv
+# =========================
+# HARD-CODED CONFIG (NO ENV)
+# =========================
 
-load_dotenv()
+# Telegram bot token (from BotFather)
+BOT_TOKEN = "6843806285:AAGVYQnjIvifgSQiRKnEIR-7NyJdFcA-YVc"
 
-BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
-BASE_URL = (os.getenv("BASE_URL") or "").strip()
-WEBHOOK_PATH = (os.getenv("WEBHOOK_PATH") or "/telegram/webhook").strip()
+# Your public Replit base URL (no trailing slash)
+BASE_URL = "https://0521fd32-e221-463f-a81c-b146964bcb33-00-377t3cqi5px22.pike.replit.dev"
 
-INBOUND_SECRET = (os.getenv("INBOUND_SECRET") or "").strip()
-DOMAIN = (os.getenv("DOMAIN") or "").strip()
+# Telegram webhook path on your FastAPI app
+WEBHOOK_PATH = "/telegram/webhook"
 
-# Turso
-TURSO_DATABASE_URL = (os.getenv("TURSO_DATABASE_URL") or "").strip()
-TURSO_AUTH_TOKEN = (os.getenv("TURSO_AUTH_TOKEN") or "").strip()
+# Cloudflare Worker -> Replit secret header (must match Worker)
+INBOUND_SECRET = "CHANGE_THIS_TO_A_STRONG_SECRET_123!"
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN missing")
-if not BASE_URL:
-    raise RuntimeError("BASE_URL missing")
-if not INBOUND_SECRET:
-    raise RuntimeError("INBOUND_SECRET missing")
-if not DOMAIN:
-    raise RuntimeError("DOMAIN missing")
-if not TURSO_DATABASE_URL:
-    raise RuntimeError("TURSO_DATABASE_URL missing")
-if not TURSO_AUTH_TOKEN:
-    raise RuntimeError("TURSO_AUTH_TOKEN missing")
+# Your domain used for emails
+DOMAIN = "xneko.xyz"
 
-if not WEBHOOK_PATH.startswith("/"):
-    raise RuntimeError("WEBHOOK_PATH must start with '/'")
+# Turso (libSQL) database URL
+# You can paste either:
+#   libsql://xxxx.turso.io
+# or https://xxxx.turso.io (db.py will normalize)
+TURSO_DATABASE_URL = "https://gags-tolaramstudent.aws-ap-south-1.turso.io"
+
+# Turso auth token
+TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3Njk3OTY3NjEsImlkIjoiMThhZjRmODAtZWJjNy00YzAwLThjMTItMmM2NWJjMzQwMjJhIiwicmlkIjoiMDg1ZmFjNjctZmQyOS00MTFkLWFiNjMtZmM2YjkyMDM0ZjkyIn0.BjvaNi9Yd5btCNa5QWXskGUjhsmWLkyeobePqB9T6FGC3aLeiNgGXeA0_c1kNUVihbdWmfOegBgyNTSWqTbgBA"
